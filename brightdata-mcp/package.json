@@ -1,10 +1,10 @@
 {
   "name": "brightdata-mcp-api",
   "version": "1.0.0",
-  "main": "simple-server.js",
+  "main": "server.js",
   "type": "module",
   "scripts": {
-    "start": "node simple-server.js"
+    "start": "node server.js"
   },
   "dependencies": {
     "@brightdata/mcp": "^1.7.0",

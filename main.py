@@ -29,7 +29,7 @@ class HotelContext(TypedDict, total=False):
     top_hotels: List[Hotel]
 
 # ========== CONFIGURATION ==========
-MCP_BASE_URL = "http://localhost:3001"
+MCP_BASE_URL = "http://localhost:3002"
 
 # Gemini API configuration
 GEMINI_API_KEY = "AIzaSyCNZH3YYWO5c7v4k-3qH5LNqv2fZsQlNMo"
@@ -104,7 +104,7 @@ def brightdata_mcp_query(location="New York", checkin="2025-05-01", checkout="20
     return response.json()
 
 
-def fetch_hotel_reviews(hotel_name, location, keywords=None) -> Dict[str, Any]:
+def fetch_hotel_reviews(hotel_name, location, booking_url=None, keywords=None) -> Dict[str, Any]:
     """
     Query the local Express proxy server at /hotel-reviews to get detailed reviews for a specific hotel.
     
@@ -113,6 +113,7 @@ def fetch_hotel_reviews(hotel_name, location, keywords=None) -> Dict[str, Any]:
     Args:
         hotel_name: Name of the hotel to fetch reviews for
         location: Location of the hotel
+        booking_url: Optional direct Booking.com URL to fetch reviews from
         keywords: Optional list of keywords to filter hotel reviews by
         
     Returns:
@@ -122,6 +123,10 @@ def fetch_hotel_reviews(hotel_name, location, keywords=None) -> Dict[str, Any]:
         "hotelName": hotel_name,
         "location": location,
     }
+    
+    # Add booking_url parameter if provided
+    if booking_url:
+        params["bookingUrl"] = booking_url
     
     # Add keywords parameter if provided
     if keywords and isinstance(keywords, list) and len(keywords) > 0:
@@ -423,27 +428,207 @@ def google_hotel_agent(context: Dict[str, Any]) -> Dict[str, Any]:
         guests = context.get("guests", 2)
         keywords = context.get("keywords", [])
         
-        # Query the hotel scraping server
+        # Step 1: Query the hotel scraping server to get a list of hotels
+        print(f"Step 1: Fetching hotels in {location} from /hotels endpoint...")
         result = brightdata_mcp_query(location, checkin, checkout, guests, keywords)
         
-        # Store the result in context
+        # Store the initial result in context
         context["google_data"] = result
         
         # Print some information about the results
         hotels = result.get("results", {}).get("hotels", [])
         print(f"Retrieved {len(hotels)} hotels from Google search results")
         
+        # Step 2: For each hotel, fetch detailed reviews using the /hotel-reviews endpoint
+        print(f"Step 2: Fetching detailed reviews for each hotel from /hotel-reviews endpoint...")
+        hotels_with_reviews = []
+        
+        for i, hotel in enumerate(hotels[:5]):  # Limit to top 5 hotels to avoid too many requests
+            hotel_name = hotel.get("name", "")
+            if not hotel_name:
+                continue
+                
+            print(f"Processing hotel {i+1}/{min(5, len(hotels))}: {hotel_name}")
+            
+            # Fetch detailed reviews for this hotel
+            detailed_reviews = fetch_hotel_reviews(hotel_name, location, None, keywords)
+            
+            # Extract the reviews
+            reviews = detailed_reviews.get("results", {}).get("reviews", [])
+            
+            # Add the detailed reviews to the hotel data
+            if reviews:
+                print(f"Found {len(reviews)} detailed reviews for {hotel_name}")
+                hotel["detailed_reviews"] = reviews
+                # Combine the original reviews with the detailed reviews
+                all_reviews = hotel.get("reviews", []) + reviews
+                # Remove duplicates (based on text content)
+                seen_texts = set()
+                unique_reviews = []
+                for review in all_reviews:
+                    text = review.get("text", "")
+                    if text and text not in seen_texts:
+                        seen_texts.add(text)
+                        unique_reviews.append(review)
+                hotel["reviews"] = unique_reviews
+            
+            hotels_with_reviews.append(hotel)
+        
+        # Update the context with the enhanced hotel data
+        if hotels_with_reviews:
+            result["results"]["hotels"] = hotels_with_reviews
+            context["google_data"] = result
+        
         # Check if we have reviews and keywords
-        if keywords:
+        if keywords and hotels_with_reviews:
             review_count = 0
-            for hotel in hotels:
+            for hotel in hotels_with_reviews:
                 reviews = hotel.get("reviews", [])
                 review_count += len(reviews)
-            print(f"Filtered reviews by keywords: {', '.join(keywords)}")
             print(f"Found a total of {review_count} reviews matching keywords: {', '.join(keywords)}")
     except Exception as e:
         print(f"Error in google_hotel_agent: {e}")
         context["google_data"] = {"error": str(e), "results": {"hotels": []}}
+    
+    # Safeguard: ensure at least one required key is set
+    required_keys = ["location", "checkin", "checkout", "guests", "keywords", "google_data", "combined_hotels", "top_hotels"]
+    if not any(k in context for k in required_keys):
+        context["location"] = "Unknown"
+    return context
+
+def scorer_agent(context: Dict[str, Any]) -> Dict[str, Any]:
+    print("Scorer Agent: Scoring and ranking hotels based on Google data and review analysis...")
+    try:
+        # Get the Google hotel data from the combined hotels
+        google_data = context.get("google_data", {})
+        hotels_data = google_data.get("results", {}).get("hotels", [])
+        keywords = context.get("keywords", [])
+        location = context.get("location", "New York")
+        
+        if not hotels_data:
+            print("No hotel data found. Attempting to fetch hotels again...")
+            try:
+                # Try to fetch hotels directly as a fallback
+                checkin = context.get("checkin", "2025-05-01")
+                checkout = context.get("checkout", "2025-05-03")
+                guests = context.get("guests", 2)
+                result = brightdata_mcp_query(location, checkin, checkout, guests, keywords)
+                hotels_data = result.get("results", {}).get("hotels", [])
+                if hotels_data:
+                    print(f"Successfully fetched {len(hotels_data)} hotels as fallback")
+                    google_data = result
+                    context["google_data"] = result
+            except Exception as fetch_error:
+                print(f"Fallback hotel fetch failed: {fetch_error}")
+                
+        # If we still don't have hotel data, use a sample
+        if not hotels_data:
+            print("No hotel data found. Using sample data.")
+            context['top_hotels'] = [
+                {
+                    'name': 'Sample Hotel 1',
+                    'score': 4.5,
+                    'source': 'sample',
+                    'address': f'123 Main St, {location}',
+                    'rating': '4.5',
+                    'reviews': [
+                        {
+                            'text': 'Great hotel with excellent service and amenities.',
+                            'rating': '4.5',
+                            'date': 'April 2025',
+                            'author': 'Sample Reviewer',
+                            'source': 'sample_data'
+                        }
+                    ],
+                    'llm_analysis': {
+                        'overall_score': 8.5,
+                        'aspect_scores': {
+                            'breakfast': 8.0,
+                            'clean': 9.0,
+                            'service': 9.5,
+                            'location': 8.0,
+                            'value': 8.0
+                        },
+                        'summary': 'This is a sample hotel with excellent service and amenities.',
+                        'strengths': ['Excellent service', 'Clean rooms', 'Good breakfast'],
+                        'weaknesses': []
+                    }
+                }
+            ]
+            return context
+        
+        # Process and score each hotel
+        scored_hotels = []
+        
+        for hotel in hotels_data:
+            hotel_name = hotel.get('name', 'Unknown Hotel')
+            print(f"\nScoring hotel: {hotel_name}")
+            
+            # Extract reviews - prioritize detailed reviews if available
+            detailed_reviews = hotel.get('detailed_reviews', [])
+            original_reviews = hotel.get('reviews', [])
+            
+            # Use detailed reviews if available, otherwise use original reviews
+            reviews = detailed_reviews if detailed_reviews else original_reviews
+            
+            # Skip hotels with no reviews
+            if not reviews:
+                print(f"No reviews found for {hotel_name}. Skipping.")
+                continue
+            
+            # Analyze the reviews
+            review_analysis = analyze_hotel_reviews(hotel_name, reviews, keywords)
+            
+            # Calculate a final score (1-5 scale) based on the review analysis
+            overall_score = review_analysis.get('overall_score', 0.0)
+            final_score = round(overall_score / 2, 1)  # Convert from 10-point to 5-point scale
+            
+            # Create a scored hotel object
+            scored_hotel = {
+                'name': hotel_name,
+                'score': final_score,
+                'source': hotel.get('source', 'unknown'),
+                'address': hotel.get('address', ''),
+                'rating': hotel.get('rating', ''),
+                'price': hotel.get('price', ''),  # Include price if available
+                'reviews': reviews,
+                'review_count': len(reviews),
+                'llm_analysis': review_analysis
+            }
+            
+            # Print some information about the analysis
+            print(f"Analysis Overall Score: {review_analysis.get('overall_score')}/10.0")
+            print(f"Final Score: {scored_hotel['score']}/5.0")
+            print(f"Summary: {review_analysis.get('summary')}")
+            print(f"Reviews analyzed: {len(reviews)}")
+            
+            if review_analysis.get('aspect_scores'):
+                print("Aspect Scores:")
+                for aspect, score in review_analysis.get('aspect_scores', {}).items():
+                    print(f"  - {aspect}: {score}/10.0")
+            
+            scored_hotels.append(scored_hotel)
+        
+        # Sort hotels by score (highest first)
+        scored_hotels.sort(key=lambda x: x['score'], reverse=True)
+        
+        # Store the top hotels in context
+        context['top_hotels'] = scored_hotels
+        
+        # Print the top hotels
+        print("\nTop Hotels:")
+        for i, hotel in enumerate(scored_hotels[:5]):
+            price_info = f" - Price: {hotel.get('price', 'N/A')}" if hotel.get('price') else ""
+            print(f"{i+1}. {hotel['name']} - Score: {hotel['score']}/5.0{price_info} - Reviews: {hotel.get('review_count', 0)}")
+        
+        # Save the hotel rankings to a file
+        save_hotel_rankings_to_file(scored_hotels)
+        
+    except Exception as e:
+        print(f"Error in scorer_agent: {e}")
+        import traceback
+        traceback.print_exc()
+        context['top_hotels'] = []
     
     # Safeguard: ensure at least one required key is set
     required_keys = ["location", "checkin", "checkout", "guests", "keywords", "google_data", "combined_hotels", "top_hotels"]
@@ -469,7 +654,7 @@ def combiner_agent(context: Dict[str, Any]) -> Dict[str, Any]:
         
         # Check if we have reviews and keywords
         keywords = context.get("keywords", [])
-        if keywords:
+        if keywords and hotels:
             review_count = 0
             for hotel in hotels:
                 reviews = hotel.get("reviews", [])
@@ -486,136 +671,6 @@ def combiner_agent(context: Dict[str, Any]) -> Dict[str, Any]:
     return context
 
 
-def scorer_agent(context: Dict[str, Any]) -> Dict[str, Any]:
-    print("Scorer Agent: Scoring and ranking hotels based on Google data and review analysis...")
-    try:
-        # Get the Google hotel data from the combined hotels
-        google_data = context.get("google_data", {})
-        hotels_data = google_data.get("results", {}).get("hotels", [])
-        keywords = context.get("keywords", [])
-        location = context.get("location", "New York")
-        
-        if not hotels_data:
-            print("No hotel data found. Using sample data.")
-            context['top_hotels'] = [
-                {
-                    'name': 'Sample Hotel 1',
-                    'score': 4.5,
-                    'source': 'sample',
-                    'address': 'Sample Address 1',
-                    'rating': '4.5',
-                    'reviews': [],
-                    'llm_analysis': {
-                        'overall_score': 0.0,
-                        'aspect_scores': {},
-                        'summary': 'No reviews available for analysis.',
-                        'strengths': [],
-                        'weaknesses': []
-                    }
-                }
-            ]
-            return context
-        
-        print(f"Analyzing {len(hotels_data)} hotels based on detailed reviews...")
-        
-        # Calculate scores for each hotel based on multiple factors
-        scored_hotels = []
-        for hotel in hotels_data:
-            hotel_name = hotel.get('name', 'Unknown Hotel')
-            print(f"\nProcessing hotel: {hotel_name}")
-            
-            # Get initial reviews from the hotel data
-            initial_reviews = hotel.get('reviews', [])
-            
-            # Fetch detailed reviews from Google Travel for this hotel
-            detailed_review_data = fetch_hotel_reviews(hotel_name, location, keywords)
-            detailed_reviews = detailed_review_data.get("results", {}).get("reviews", [])
-            
-            # Combine both sets of reviews, prioritizing detailed reviews
-            all_reviews = detailed_reviews + initial_reviews
-            
-            # Remove duplicate reviews (based on text content)
-            unique_reviews = []
-            review_texts = set()
-            for review in all_reviews:
-                review_text = review.get('text', '')
-                if review_text and review_text not in review_texts:
-                    review_texts.add(review_text)
-                    unique_reviews.append(review)
-            
-            # Get the hotel's base rating
-            base_rating = 0.0
-            try:
-                if hotel.get('rating'):
-                    base_rating = float(hotel.get('rating', 0))
-            except (ValueError, TypeError):
-                # If rating can't be converted to float, use a default value
-                base_rating = 3.0
-            
-            # Use our analyze_hotel_reviews function to analyze reviews and generate scores
-            # This will try Gemini Pro first, then fall back to local analysis if needed
-            review_analysis = analyze_hotel_reviews(hotel_name, unique_reviews, keywords)
-            
-            # Calculate final score using the analysis
-            # Convert score from 0-10 scale to 0-5 scale to match Google ratings
-            analysis_score = review_analysis.get('overall_score', 0.0) / 2.0
-            
-            # Weighted average: 40% base rating from Google, 60% from our analysis
-            if analysis_score > 0:
-                final_score = (base_rating * 0.4) + (analysis_score * 0.6)
-            else:
-                final_score = base_rating
-            
-            # Create a hotel object with all the necessary information
-            scored_hotel = {
-                'name': hotel_name,
-                'score': round(final_score, 2),  # Round to 2 decimal places
-                'source': hotel.get('source', 'google'),
-                'address': hotel.get('address', ''),
-                'rating': hotel.get('rating', ''),
-                'reviews': unique_reviews,
-                'travel_url': f"https://www.google.com/travel/search?q={hotel_name.replace(' ', '%20')}%20{location.replace(' ', '%20')}&hl=en&gl=us&ssta=1&ap=ugEHcmV2aWV3cw",
-                'llm_analysis': review_analysis
-            }
-            
-            # Print some information about the analysis
-            print(f"Analysis Overall Score: {review_analysis.get('overall_score')}/10.0")
-            print(f"Final Score: {scored_hotel['score']}/5.0")
-            print(f"Summary: {review_analysis.get('summary')}")
-            
-            if review_analysis.get('aspect_scores'):
-                print("Aspect Scores:")
-                for aspect, score in review_analysis.get('aspect_scores', {}).items():
-                    print(f"  {aspect}: {score}/10.0")
-            
-            scored_hotels.append(scored_hotel)
-        
-        # Sort hotels by score (highest first)
-        sorted_hotels = sorted(scored_hotels, key=lambda x: -x['score'])
-        
-        # Get the top 5 hotels
-        top5 = sorted_hotels[:5]
-        
-        print("\nTop 5 Hotels:")
-        for h in top5:
-            review_count = len(h.get('reviews', []))
-            travel_reviews = sum(1 for r in h.get('reviews', []) if r.get('source') in ['google_travel', 'google_travel_html'])
-            analysis_score = h.get('llm_analysis', {}).get('overall_score', 0)
-            print(f"{h['name']} (Score: {h['score']}/5.0, Analysis: {analysis_score}/10.0) - {review_count} reviews")
-        
-        context['top_hotels'] = top5
-    except Exception as e:
-        print(f"Error in scorer_agent: {e}")
-        import traceback
-        traceback.print_exc()
-        context['top_hotels'] = []
-        
-    # Safeguard: ensure at least one required key is set
-    required_keys = ["location", "checkin", "checkout", "guests", "keywords", "google_data", "combined_hotels", "top_hotels"]
-    if not any(k in context for k in required_keys):
-        context["location"] = "Unknown"
-    return context
-
 # ========== LANGGRAPH SETUP ==========
 graph = StateGraph(state_schema=HotelContext)
 graph.add_node("orchestrator", orchestrator)
@@ -630,6 +685,7 @@ graph.add_edge("scorer_agent", END)
 
 graph.set_entry_point("orchestrator")
 
+
 def save_hotel_rankings_to_file(hotels, filename="hotel_rankings.txt"):
     """Save hotel rankings to a file for easier viewing"""
     with open(filename, "w") as f:
@@ -638,50 +694,70 @@ def save_hotel_rankings_to_file(hotels, filename="hotel_rankings.txt"):
         
         for i, hotel in enumerate(hotels):
             review_count = len(hotel.get('reviews', []))
-            travel_reviews = sum(1 for r in hotel.get('reviews', []) if r.get('source') in ['google_travel', 'google_travel_html'])
+            review_sources = {}
+            for r in hotel.get('reviews', []):
+                source = r.get('source', 'unknown')
+                review_sources[source] = review_sources.get(source, 0) + 1
+            
             analysis = hotel.get('llm_analysis', {})
             
             f.write(f"{i+1}. {hotel['name']}\n")
-            f.write("-" * 80 + "\n")
-            f.write(f"Final Score: {hotel['score']}/5.0\n")
-            f.write(f"Google Rating: {hotel.get('rating', 'N/A')}/5.0\n")
-            f.write(f"Analysis Score: {analysis.get('overall_score', 0.0)}/10.0\n")
-            f.write(f"Address: {hotel.get('address', 'N/A')}\n")
-            f.write(f"Reviews: {review_count} total ({travel_reviews} from Google Travel)\n")
+            f.write(f"   Score: {hotel['score']}/5.0\n")
+            f.write(f"   Address: {hotel.get('address', 'N/A')}\n")
+            f.write(f"   Rating: {hotel.get('rating', 'N/A')}\n")
+            if hotel.get('price'):
+                f.write(f"   Price: {hotel.get('price')}\n")
             
-            # Write the Google Travel URL
-            if hotel.get('travel_url'):
-                f.write(f"Google Travel URL: {hotel['travel_url']}\n")
+            # Write review source breakdown
+            f.write(f"   Reviews: {review_count} total")
+            if review_sources:
+                f.write(" (")
+                source_strings = [f"{count} from {source}" for source, count in review_sources.items()]
+                f.write(", ".join(source_strings))
+                f.write(")")
+            f.write("\n\n")
             
-            # Write analysis summary
-            if analysis.get('summary'):
-                f.write("\nSUMMARY:\n")
-                f.write(f"{analysis.get('summary')}\n")
-            
-            # Write aspect scores
-            if analysis.get('aspect_scores'):
-                f.write("\nASPECT SCORES:\n")
-                for aspect, score in sorted(analysis.get('aspect_scores', {}).items(), key=lambda x: -x[1]):
-                    f.write(f"- {aspect}: {score}/10.0\n")
-            
-            # Write strengths and weaknesses
-            if analysis.get('strengths'):
-                f.write("\nSTRENGTHS:\n")
-                for strength in analysis.get('strengths', []):
-                    f.write(f"+ {strength}\n")
-            
-            if analysis.get('weaknesses'):
-                f.write("\nAREAS FOR IMPROVEMENT:\n")
-                for weakness in analysis.get('weaknesses', []):
-                    f.write(f"- {weakness}\n")
+            # Write analysis details
+            if analysis:
+                f.write("ANALYSIS:\n")
+                f.write(f"Overall Score: {analysis.get('overall_score', 0.0)}/10.0\n")
+                f.write(f"Summary: {analysis.get('summary', 'No summary available')}\n\n")
+                
+                if analysis.get('aspect_scores'):
+                    f.write("Aspect Scores:\n")
+                    for aspect, score in analysis.get('aspect_scores', {}).items():
+                        f.write(f"- {aspect}: {score}/10.0\n")
+                    f.write("\n")
+                
+                if analysis.get('strengths'):
+                    f.write("Strengths:\n")
+                    for strength in analysis.get('strengths', []):
+                        f.write(f"+ {strength}\n")
+                    f.write("\n")
+                
+                if analysis.get('weaknesses'):
+                    f.write("Weaknesses:\n")
+                    for weakness in analysis.get('weaknesses', []):
+                        f.write(f"- {weakness}\n")
+                    f.write("\n")
             
             # Write sample reviews
             if hotel.get('reviews'):
                 f.write("\nSAMPLE REVIEWS:\n")
-                for i, review in enumerate(hotel.get('reviews', [])[:3]):  # Show up to 3 reviews
-                    f.write(f"Review {i+1}: \"{review.get('text', 'No review text')}\"\n")
+                for i, review in enumerate(hotel.get('reviews', [])[:5]):  # Show up to 5 reviews
+                    source_info = f" (Source: {review.get('source', 'unknown')})" if review.get('source') else ""
+                    f.write(f"Review {i+1}{source_info}: \"{review.get('text', 'No review text')}\"\n")
+                    
+                    # Add rating if available
+                    if review.get('rating'):
+                        f.write(f"Rating: {review.get('rating')}\n")
+                        
+                    # Add author and date if available
                     if review.get('author'):
-                        f.write(f"- {review.get('author')} ({review.get('date', '')})\n")
+                        f.write(f"- {review.get('author')}")
+                        if review.get('date'):
+                            f.write(f" ({review.get('date')})")
+                        f.write("\n")
                     f.write("\n")
             
             f.write("=" * 80 + "\n\n")
@@ -700,6 +776,7 @@ if __name__ == "__main__":
     parser.add_argument('--checkout', '-co', type=str, default="2025-05-03", help='Check-out date (YYYY-MM-DD)')
     parser.add_argument('--guests', '-g', type=int, default=2, help='Number of guests')
     parser.add_argument('--output', '-o', type=str, default="hotel_rankings.txt", help='Output file for detailed rankings')
+    parser.add_argument('--booking-url', '-b', type=str, help='Direct Booking.com URL to fetch reviews from')
     
     args = parser.parse_args()
     
@@ -715,7 +792,8 @@ if __name__ == "__main__":
         "checkin": args.checkin,
         "checkout": args.checkout,
         "guests": args.guests,
-        "keywords": keywords
+        "keywords": keywords,
+        "booking_url": args.booking_url
     }
     
     print(f"\nSearching for hotels in {args.location} with keywords: {', '.join(keywords)}")
