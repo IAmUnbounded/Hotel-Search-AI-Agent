@@ -232,7 +232,7 @@ app.get('/hotel-reviews', async (req, res) => {
         method: 'POST',
         data: {
           url: targetUrl,
-          zone: 'mcp_unlocker',  // Use the SERP API zone as specified in the token
+          zone: 'web_unlocker',  // Use the Web Unlocker API. Create the zone for this.
           format: 'json',     // Get JSON response
         },
         headers: { 'Authorization': `Bearer ${BRIGHTDATA_MCP_API_TOKEN}` },
