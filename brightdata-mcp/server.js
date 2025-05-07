@@ -10,7 +10,7 @@ const port = process.env.PORT || 3002;
 app.use(express.json());
 
 // Bright Data API token
-const BRIGHTDATA_MCP_API_TOKEN = '65203a28ae2e955d6fdda4280abc4659183f54bbee41a62632b2f9f60e3627e0';
+const BRIGHTDATA_MCP_API_TOKEN = '';
 
 if (!BRIGHTDATA_MCP_API_TOKEN) {
   console.error('Missing BRIGHTDATA_MCP_API_TOKEN in environment');
@@ -232,7 +232,7 @@ app.get('/hotel-reviews', async (req, res) => {
         method: 'POST',
         data: {
           url: targetUrl,
-          zone: 'serp_api1',  // Use the SERP API zone as specified in the token
+          zone: 'mcp_unlocker',  // Use the SERP API zone as specified in the token
           format: 'json',     // Get JSON response
         },
         headers: { 'Authorization': `Bearer ${BRIGHTDATA_MCP_API_TOKEN}` },
