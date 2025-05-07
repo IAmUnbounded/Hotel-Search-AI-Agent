@@ -32,7 +32,7 @@ class HotelContext(TypedDict, total=False):
 MCP_BASE_URL = "http://localhost:3002"
 
 # Gemini API configuration
-GEMINI_API_KEY = "AIzaSyCNZH3YYWO5c7v4k-3qH5LNqv2fZsQlNMo"
+GEMINI_API_KEY = ""
 
 # Configure Gemini API
 genai.configure(api_key=GEMINI_API_KEY)
